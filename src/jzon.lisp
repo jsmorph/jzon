@@ -308,6 +308,26 @@ see `json-atom'"
                                (make-array (fill-pointer string-accum) :element-type 'base-char :initial-contents string-accum)
                                (make-array (fill-pointer string-accum) :element-type 'character :initial-contents string-accum)))))))
 
+(defun %decimal-to-double (mantissa exponent sign)
+  (cond
+    ((zerop mantissa) (if (minusp sign) -0.0d0 0.0d0))
+    (t
+     (or (com.inuoe.jzon/eisel-lemire:make-double mantissa exponent (minusp sign))
+         (let ((bound (+ (integer-length mantissa) (* 3 exponent))))
+           ;; 2^3 < 10 bounds values away from binary64 rounding boundaries.
+           (cond
+             ((and (not (minusp exponent)) (> bound 1024))
+              (error 'floating-point-overflow
+                     :operation '%decimal-to-double
+                     :operands (list mantissa exponent sign)))
+             ((and (minusp exponent) (<= bound -1075))
+              (error 'floating-point-underflow
+                     :operation '%decimal-to-double
+                     :operands (list mantissa exponent sign)))
+             (t
+              (com.inuoe.jzon/ratio-to-double:ratio-to-double
+               (* mantissa (expt 10 exponent) sign)))))))))
+
 (defun %read-json-number (step c)
   "Reads an RFC 8259 number, starting with `c'."
   (declare (type function step))
@@ -324,8 +344,7 @@ see `json-atom'"
                    (if (or (null c) (%ends-token-p c))
                      (let ((exp10 (+ exp10 (* exp-sign exp-val))))
                        (return  (values
-                                  (or (com.inuoe.jzon/eisel-lemire:make-double mantissa exp10 (minusp sign))
-                                      (com.inuoe.jzon/ratio-to-double:ratio-to-double (* mantissa (expt 10 exp10) sign)))
+                                  (%decimal-to-double mantissa exp10 sign)
                                   c)))
                      c))))
     (prog ((sign 1)
