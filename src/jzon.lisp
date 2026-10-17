@@ -412,7 +412,7 @@ see `json-atom'"
 
 (defun %calc-pos (step n)
   "Calculate line, column numbers by `step' ping through the input `n' times."
-  (declare (type (integer 1) n))
+  (declare (type (integer 0) n))
   (loop :with line :of-type (integer 1)  := 1
         :with col :of-type (integer 1) := 1
         :for p :from 0 :below (1- n)
@@ -488,39 +488,43 @@ see `json-atom'"
   (def-make-string-fns %make-fns-simple-string simple-string)
   (def-make-string-fns %make-fns-string (and string (not simple-string))))
 
+(defun %raise-utf-8-error (type format &rest arguments)
+  (error type :format-control format :format-arguments arguments
+              :line nil :column nil))
+
 (declaim (inline %utf-8-decode))
 (defun %utf-8-decode (u1 consume-octet)
   (declare (type (unsigned-byte 8) u1))
   (macrolet ((consume-octet ()
                `(let ((o (funcall (the (function () (values (unsigned-byte 8) &optional)) consume-octet))))
-                 (if (< #x7f o #xc0) o (error "Unexpected value #x~2,'0X in UTF-8 sequence." o)))))
+                 (if (< #x7f o #xc0) o (%raise-utf-8-error 'json-parse-error "Unexpected value #x~2,'0X in UTF-8 sequence." o)))))
     (cond
       ((< u1 #x80) (code-char u1))
-      ((< u1 #xc0) (error "Unexpected value #x~2,'0X at start of UTF-8 sequence." u1))
+      ((< u1 #xc0) (%raise-utf-8-error 'json-parse-error "Unexpected value #x~2,'0X at start of UTF-8 sequence." u1))
       (t
         (let ((u2 (consume-octet)))
           (cond
-            ((< u1 #xc2) (error "Overlong UTF-8 sequence."))
+            ((< u1 #xc2) (%raise-utf-8-error 'json-parse-error "Overlong UTF-8 sequence."))
             ((< u1 #xe0)
               (code-char (logior (ash (logand u1 #x1f) 6)
                                  (ash (logxor u2 #x80) 0))))
             (t
               (let ((u3 (consume-octet)))
                 (cond
-                  ((and (= u1 #xe0) (< u2 #xa0)) (error "Overlong UTF-8 sequence."))
+                  ((and (= u1 #xe0) (< u2 #xa0)) (%raise-utf-8-error 'json-parse-error "Overlong UTF-8 sequence."))
                   ((< u1 #xf0)
                     (let ((start (logior (ash (logand u1 #x0f) 12)
                                          (ash (logand u2 #x3f) 6))))
                       (if (<= #xd800 start #xdfc0)
-                        (error "Character out of range in UTF-8 sequence.")
+                        (%raise-utf-8-error 'json-parse-error "Character out of range in UTF-8 sequence.")
                         (code-char (logior start (logand u3 #x3f))))))
                   (t ; 4 octets
                     (let ((u4 (consume-octet)))
                       (cond
-                        ((and (= u1 #xf0) (< u2 #x90)) (error "Overlong UTF-8 sequence."))
+                        ((and (= u1 #xf0) (< u2 #x90)) (%raise-utf-8-error 'json-parse-error "Overlong UTF-8 sequence."))
                         ((< u1 #xf8)
                           (if (or (> u1 #xf4) (and (= u1 #xf4) (> u2 #x8f)))
-                            (error "Character out of range in UTF-8 sequence.")
+                            (%raise-utf-8-error 'json-parse-error "Character out of range in UTF-8 sequence.")
                             (code-char (logior (ash (logand u1 #x07) 18)
                                                (ash (logxor u2 #x80) 12)
                                                (ash (logxor u3 #x80) 6)
@@ -531,13 +535,13 @@ see `json-atom'"
                         (t
                           (consume-octet)
                           (cond
-                            ((and (= u1 #xf8) (< u2 #x88)) (error "Overlong UTF-8 sequence."))
-                            ((< u1 #xfc) (error "Character out of range in UTF-8 sequence."))
+                            ((and (= u1 #xf8) (< u2 #x88)) (%raise-utf-8-error 'json-parse-error "Overlong UTF-8 sequence."))
+                            ((< u1 #xfc) (%raise-utf-8-error 'json-parse-error "Character out of range in UTF-8 sequence."))
                             (t
                               (consume-octet)
                               (cond
-                                ((and (= u1 #xfc) (< u2 #x84)) (error "Overlong UTF-8 sequence."))
-                                (t (error "Character out of range in UTF-8 sequence."))))))))))))))))))
+                                ((and (= u1 #xfc) (< u2 #x84)) (%raise-utf-8-error 'json-parse-error "Overlong UTF-8 sequence."))
+                                (t (%raise-utf-8-error 'json-parse-error "Character out of range in UTF-8 sequence."))))))))))))))))))
 
 (macrolet ((def-make-ub8-fns (name type)
              `(defun ,name (in start end max-string-length)
@@ -546,7 +550,7 @@ see `json-atom'"
                (declare (type (integer 1 (#.array-dimension-limit)) max-string-length))
                (let ((i start))
                  (declare (type (integer 0 #.array-dimension-limit) i))
-                 (let* ((consume-octet (lambda () (if (< i end) (aref in (shiftf i (1+ i))) (error "End of data while in UTF-8 sequence."))))
+                 (let* ((consume-octet (lambda () (if (< i end) (aref in (shiftf i (1+ i))) (%raise-utf-8-error 'json-eof-error "End of data while in UTF-8 sequence."))))
                         (step (lambda () (when (< i end) (%utf-8-decode (aref in (shiftf i (1+ i))) consume-octet))))
                         (pos (lambda () (%calc-pos step (- (shiftf i start) start))))
                         (read-string (let ((string-accum (make-array (min 256 (1- array-dimension-limit)) :element-type 'character :adjustable t :fill-pointer 0)))
@@ -561,7 +565,7 @@ see `json-atom'"
   (declare (type stream in))
   (declare (type (integer 1 (#.array-dimension-limit)) max-string-length))
   (let* ((consume-octet (lambda () (or (read-byte in nil nil)
-                                       (error "End of data while in UTF-8 sequence."))))
+                                       (%raise-utf-8-error 'json-eof-error "End of data while in UTF-8 sequence."))))
          (step (lambda () (let ((u1 (read-byte in nil nil))) (when u1 (%utf-8-decode u1 consume-octet)))))
          (pos (lambda ()
                 (let ((n (ignore-errors (file-position in))))
